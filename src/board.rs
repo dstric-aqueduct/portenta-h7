@@ -46,6 +46,9 @@ impl Board {
 
         // Configure power domains and clock tree
         let pwrcfg = dp.PWR.constrain().vos0(&dp.SYSCFG).freeze();
+
+        dp.RCC.ahb2enr.modify(|_, w| w.sram3en().set_bit());
+
         let ccdr = dp
             .RCC
             .constrain()
@@ -71,6 +74,7 @@ impl Board {
                 dp.GPIOJ.split(ccdr.peripheral.GPIOJ),
             )
         };
+
         // Enable ULPI transceiver (GPIOJ4)
         let mut ulpi_reset = gpioj.pj4.into_push_pull_output();
         ulpi_reset.set_high();
@@ -118,7 +122,10 @@ impl Board {
             let rmii_tx_en = gpiog.pg11.into_alternate();
             let rmii_txd0 = gpiog.pg13.into_alternate();
             let rmii_txd1 = gpiog.pg12.into_alternate();
-            
+
+            // Initialise ethernet...
+            assert_eq!(ccdr.clocks.hclk(), Hertz::from_raw(240_000_000)); // HCLK 240MHz
+
             let mac_addr = smoltcp::wire::EthernetAddress::from_bytes(&MAC_ADDRESS);
             (eth_dma, eth_mac) = unsafe {
                 ethernet::new(

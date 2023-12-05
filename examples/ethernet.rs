@@ -8,8 +8,6 @@
 
 use core::mem::MaybeUninit;
 use core::ptr::addr_of_mut;
-use core::sync::atomic::AtomicU32;
-use core::sync::atomic::Ordering;
 
 use cortex_m::singleton;
 use portenta_h7::{
@@ -25,16 +23,14 @@ use usb_device::prelude::*;
 use usbd_serial::CdcAcmClass;
 
 use smoltcp::iface::{Config, Interface, SocketSet, SocketStorage};
+use smoltcp::socket::{raw, AnySocket};
 use smoltcp::time::Instant;
-use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr};
+use smoltcp::wire::{HardwareAddress, Icmpv4Packet, Icmpv4Repr, IpAddress, IpCidr};
 
 const USB_BUS_BUFFER_SIZE: usize = 1024;
 static mut USB_BUS_BUFFER: [u32; USB_BUS_BUFFER_SIZE] = [0u32; USB_BUS_BUFFER_SIZE];
 const USB_HS_MAX_PACKET_SIZE: usize = 512;
 static mut USB_APP_BUFFER: [u8; USB_HS_MAX_PACKET_SIZE] = [0u8; USB_HS_MAX_PACKET_SIZE];
-
-/// TIME is an atomic u32 that counts milliseconds.
-static TIME: AtomicU32 = AtomicU32::new(0);
 
 // This data will be held by Net through a mutable reference
 pub struct NetStorageStatic<'a> {
@@ -61,7 +57,7 @@ impl<'a> Net<'a> {
         let mut iface = Interface::new(config, &mut ethdev, now);
         // Set IP address
         iface.update_ip_addrs(|addrs| {
-            let _ = addrs.push(IpCidr::new(IpAddress::v4(192, 168, 1, 99), 0));
+            let _ = addrs.push(IpCidr::new(IpAddress::v4(192, 168, 1, 99), 24));
         });
 
         let sockets = SocketSet::new(&mut store.socket_storage[..]);
@@ -80,6 +76,27 @@ impl<'a> Net<'a> {
 
         self.iface
             .poll(timestamp, &mut self.ethdev, &mut self.sockets);
+
+        let mut echo_payload = [0xffu8; 40];
+
+        for (handle, socket) in self.sockets.iter_mut() {
+            let socket: Option<&mut raw::Socket> = AnySocket::downcast_mut(socket);
+
+            match socket {
+                Some(socket) => {
+                    if socket.can_send() {
+                        let icmp_repr = Icmpv4Repr::EchoRequest {
+                            ident: 0,
+                            seq_no: 0,
+                            data: &echo_payload,
+                        };
+
+                        let icmp_payload = socket.send(icmp_repr.buffer_len()).unwrap();
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 }
 
@@ -93,9 +110,11 @@ mod app {
     #[local]
     struct Local {
         led_blue: led::user::Blue,
+        led_red: led::user::Red,
         usb_dev: UsbDevice<'static, UsbBus<USB>>,
         usb_serial_port: CdcAcmClass<'static, UsbBus<USB>>,
         net: Net<'static>,
+        lan8742a: ethernet::phy::LAN8742A<ethernet::EthernetMAC>,
     }
 
     #[monotonic(binds = SysTick, default = true)]
@@ -110,6 +129,7 @@ mod app {
         // Get board resources
         let Board {
             led_blue,
+            led_red,
             usb,
             ethernet: (eth_dma, eth_mac),
             ..
@@ -135,8 +155,8 @@ mod app {
         let mut lan8742a = ethernet::phy::LAN8742A::new(eth_mac);
         lan8742a.phy_reset();
         lan8742a.phy_init();
-        // The eth_dma should not be used until the PHY reports the link is up
 
+        // The eth_dma should not be used until the PHY reports the link is up
         unsafe { ethernet::enable_interrupt() };
 
         // unsafe: mutable reference to static storage, we only do this once
@@ -163,6 +183,8 @@ mod app {
                 usb_dev,
                 usb_serial_port,
                 net,
+                lan8742a,
+                led_red,
             },
             init::Monotonics(mono),
         )
@@ -220,7 +242,18 @@ mod app {
     fn ethernet_event(ctx: ethernet_event::Context) {
         unsafe { ethernet::interrupt_handler() }
 
-        let time = TIME.load(Ordering::Relaxed);
+        let time: u64 = monotonics::now().ticks();
         ctx.local.net.poll(time as i64);
+    }
+
+    #[idle(local = [lan8742a, led_red])]
+    fn idle(ctx: idle::Context) -> ! {
+        loop {
+            // Ethernet
+            match ctx.local.lan8742a.poll_link() {
+                true => ctx.local.led_red.set_low(),
+                _ => ctx.local.led_red.set_high(),
+            }
+        }
     }
 }
