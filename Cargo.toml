@@ -9,11 +9,20 @@ cortex-m-rt = "0.7"
 stm32h7xx-hal = { version = "0.15.0", features = ["stm32h747cm7", "rt", "usb_hs"] }
 rtt-target = { version = "0.4.0"}
 
+[dependencies.smoltcp]
+optional = true
+version = "0.10.0"
+default-features = false
+features = ["medium-ethernet", "proto-ipv4", "proto-ipv6", "socket-raw"]
+
 [dev-dependencies]
 cortex-m-rtic = "1.1.4"
 systick-monotonic = "1.0.1"
 usb-device = "0.2.9"
 usbd-serial = "0.1.1"
+
+[features]
+ethernet = ["smoltcp", "stm32h7xx-hal/ethernet"]
 
 [profile.dev]
 opt-level = 0
@@ -32,3 +41,7 @@ overflow-checks = false
 lto = true
 panic = 'abort'
 incremental = false
+
+[[example]]
+name = "ethernet"
+required-features = ["ethernet"]
